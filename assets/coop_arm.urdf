@@ -1,0 +1,182 @@
+<?xml version="1.0"?>
+<robot name="coop_arm">
+  <material name="orange"><color rgba="0.96 0.47 0.10 1.0"/></material>
+  <material name="blue"><color rgba="0.10 0.28 0.78 1.0"/></material>
+  <material name="white"><color rgba="0.94 0.94 0.95 1.0"/></material>
+
+  <!-- 基座立柱 -->
+  <link name="base_link">
+    <inertial>
+      <origin xyz="0 0 0.075"/><mass value="6.0"/>
+      <inertia ixx="0.0197" ixy="0" ixz="0" iyy="0.0197" iyz="0" izz="0.0169"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0.075"/>
+      <geometry><cylinder radius="0.075" length="0.15"/></geometry>
+      <material name="blue"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.075"/>
+      <geometry><cylinder radius="0.075" length="0.15"/></geometry>
+    </collision>
+  </link>
+
+  <!-- 偏航关节 -->
+  <joint name="j1" type="revolute">
+    <parent link="base_link"/><child link="link1"/>
+    <origin xyz="0 0 0.15" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.50" upper="3.50" effort="150" velocity="2.5"/>
+  </joint>
+
+  <!-- 肩部鼓形 -->
+  <link name="link1">
+    <inertial>
+      <origin xyz="0 0 0.03"/><mass value="2.0"/>
+      <inertia ixx="0.0021" ixy="0" ixz="0" iyy="0.0021" iyz="0" izz="0.0030"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0.03"/>
+      <geometry><cylinder radius="0.055" length="0.06"/></geometry>
+      <material name="blue"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.03"/>
+      <geometry><cylinder radius="0.055" length="0.06"/></geometry>
+    </collision>
+  </link>
+
+  <!-- 肩关节（俯仰） -->
+  <joint name="j2" type="revolute">
+    <parent link="link1"/><child link="link2"/>
+    <origin xyz="0 0 0.06" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.9" upper="2.9" effort="150" velocity="2.5"/>
+  </joint>
+
+  <!-- 大臂 -->
+  <link name="link2">
+    <inertial>
+      <origin xyz="0 0 0.125"/><mass value="1.6"/>
+      <inertia ixx="0.0124" ixy="0" ixz="0" iyy="0.0124" iyz="0" izz="0.0008"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0"/>
+      <geometry><sphere radius="0.045"/></geometry>
+      <material name="blue"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.125"/>
+      <geometry><cylinder radius="0.032" length="0.25"/></geometry>
+      <material name="orange"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.125"/>
+      <geometry><cylinder radius="0.032" length="0.25"/></geometry>
+    </collision>
+  </link>
+
+  <!-- 肘关节（俯仰） -->
+  <joint name="j3" type="revolute">
+    <parent link="link2"/><child link="link3"/>
+    <origin xyz="0 0 0.25" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.9" upper="2.9" effort="120" velocity="2.5"/>
+  </joint>
+
+  <!-- 小臂 -->
+  <link name="link3">
+    <inertial>
+      <origin xyz="0 0 0.105"/><mass value="1.2"/>
+      <inertia ixx="0.0070" ixy="0" ixz="0" iyy="0.0070" iyz="0" izz="0.0005"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0"/>
+      <geometry><sphere radius="0.040"/></geometry>
+      <material name="blue"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.105"/>
+      <geometry><cylinder radius="0.028" length="0.21"/></geometry>
+      <material name="orange"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.105"/>
+      <geometry><cylinder radius="0.028" length="0.21"/></geometry>
+    </collision>
+  </link>
+
+  <!-- 腕关节（俯仰）：手掌原点 = 掌心贴合面 -->
+  <joint name="j4" type="revolute">
+    <parent link="link3"/><child link="hand"/>
+    <origin xyz="0 0 0.21" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.4" upper="2.4" effort="80" velocity="3.0"/>
+  </joint>
+
+  <!-- 手掌 + 两根手指 -->
+  <link name="hand">
+    <inertial>
+      <origin xyz="0 0 -0.015"/><mass value="0.6"/>
+      <inertia ixx="0.0007" ixy="0" ixz="0" iyy="0.0012" iyz="0" izz="0.0012"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 -0.030"/>
+      <geometry><cylinder radius="0.034" length="0.030"/></geometry>
+      <material name="blue"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 -0.008"/>
+      <geometry><box size="0.056 0.104 0.016"/></geometry>
+      <material name="white"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.008"/>
+      <geometry><box size="0.056 0.104 0.016"/></geometry>
+    </collision>
+  </link>
+
+  <joint name="jf1" type="prismatic">
+    <parent link="hand"/><child link="finger1"/>
+    <origin xyz="0 0.042 0" rpy="0 0 0"/>
+    <axis xyz="0 -1 0"/>
+    <limit lower="0" upper="0.012" effort="40" velocity="0.25"/>
+  </joint>
+  <link name="finger1">
+    <inertial>
+      <origin xyz="0 0.006 0.0125"/><mass value="0.15"/>
+      <inertia ixx="0.0001" ixy="0" ixz="0" iyy="0.0001" iyz="0" izz="0.0001"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0.006 0.0125"/>
+      <geometry><box size="0.012 0.012 0.025"/></geometry>
+      <material name="white"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0.006 0.0125"/>
+      <geometry><box size="0.012 0.012 0.025"/></geometry>
+    </collision>
+  </link>
+
+  <joint name="jf2" type="prismatic">
+    <parent link="hand"/><child link="finger2"/>
+    <origin xyz="0 -0.042 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="0" upper="0.012" effort="40" velocity="0.25"/>
+  </joint>
+  <link name="finger2">
+    <inertial>
+      <origin xyz="0 -0.006 0.0125"/><mass value="0.15"/>
+      <inertia ixx="0.0001" ixy="0" ixz="0" iyy="0.0001" iyz="0" izz="0.0001"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 -0.006 0.0125"/>
+      <geometry><box size="0.012 0.012 0.025"/></geometry>
+      <material name="white"/>
+    </visual>
+    <collision>
+      <origin xyz="0 -0.006 0.0125"/>
+      <geometry><box size="0.012 0.012 0.025"/></geometry>
+    </collision>
+  </link>
+</robot>
