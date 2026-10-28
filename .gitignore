@@ -1,0 +1,24 @@
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Build outputs and local exports
+build/
+dist/
+*.spec
+*.exe
+*.zip
+*.rar
+*.log
+renders/
+
+# Runtime assets (including OBJ meshes) are intentionally tracked.

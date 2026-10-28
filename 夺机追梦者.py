@@ -91,7 +91,102 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # 全局资源目录路径与台词常量定义
 # ---------------------------------------------------------------------------
-ROOT = os.path.dirname(os.path.abspath(__file__))   # 当前脚本所在根目录
+# ---------------------------------------------------------------------------
+# 【核心修复】解决 PyBullet C++ 底层 (b3ResourcePath / fopen) 在中文路径或 EXE 下
+# 无法加载任何 PNG 纹理贴图（导致字幕、闹钟、地板、人脸全部变灰白纯色块）的问题！
+# ---------------------------------------------------------------------------
+import shutil
+import tempfile
+
+def _init_ascii_runtime_root() -> str:
+    """定位项目原始资源目录，并在路径含中文字符（或处于 EXE 打包环境）时，
+    自动同步到纯英文（ASCII）高速缓存目录，确保 PyBullet C++ 底层 100% 加载成功。"""
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        mei_dir = getattr(sys, "_MEIPASS", exe_dir)
+        # 依次查找：_internal/assets -> exe同级/assets -> exe上级/assets -> exe上两级/assets
+        candidates = [
+            mei_dir,
+            exe_dir,
+            os.path.dirname(exe_dir),
+            os.path.dirname(os.path.dirname(exe_dir)),
+        ]
+        src_root = mei_dir
+        for cand in candidates:
+            if cand and os.path.exists(os.path.join(cand, "assets")):
+                src_root = cand
+                break
+    else:
+        src_root = os.path.dirname(os.path.abspath(__file__))
+
+    # 判断路径是否包含非 ASCII 字符（如“夺机追梦者”或中文用户名）
+    def _is_pure_ascii(s: str) -> bool:
+        try:
+            s.encode("ascii")
+            return True
+        except UnicodeEncodeError:
+            return False
+
+    # 在 Windows 下优先选取纯英文根路径（如 C:/Users/Public/sleep_guardian_cache）
+    if sys.platform.startswith("win") and (getattr(sys, "frozen", False) or not _is_pure_ascii(src_root)):
+        ascii_candidates = [
+            os.path.join(os.environ.get("PUBLIC", "C:\\Users\\Public"), "sleep_guardian_cache"),
+            "C:\\Temp\\sleep_guardian_cache",
+            os.path.join(tempfile.gettempdir(), "sleep_guardian_cache"),
+        ]
+        cache_root = ascii_candidates[0]
+        for ac in ascii_candidates:
+            if _is_pure_ascii(ac):
+                try:
+                    os.makedirs(ac, exist_ok=True)
+                    cache_root = ac
+                    break
+                except Exception:
+                    continue
+        # 将原始目录中的 assets 资源完整增量同步到纯英文缓存目录
+        src_assets = os.path.join(src_root, "assets")
+        dst_assets = os.path.join(cache_root, "assets")
+        if os.path.exists(src_assets) and os.path.abspath(src_assets) != os.path.abspath(dst_assets):
+            try:
+                shutil.copytree(src_assets, dst_assets, dirs_exist_ok=True)
+            except Exception as e:
+                print("同步 assets 到纯英文缓存目录提示:", e)
+        active_root = cache_root
+    else:
+        active_root = src_root
+
+    os.makedirs(os.path.join(active_root, "assets"), exist_ok=True)
+    try:
+        os.chdir(active_root)
+    except Exception:
+        pass
+
+    # 同步重定向所有子模块的 __file__ 与内部路径常量（ROOT / ASSETS / *_DIR），
+    # 确保 textures.make_all() 和 meshgen 将文件直接生成在 active_root/assets 下！
+    for mod_name in ("textures", "meshgen", "pngutil", "robot_rig", "woman_rig"):
+        mod = sys.modules.get(mod_name)
+        if mod is not None:
+            try:
+                mod.__file__ = os.path.join(active_root, f"{mod_name}.py")
+                if hasattr(mod, "ROOT"):
+                    mod.ROOT = active_root
+                if hasattr(mod, "ASSETS"):
+                    mod.ASSETS = os.path.join(active_root, "assets")
+                if hasattr(mod, "TEX_DIR"):
+                    mod.TEX_DIR = os.path.join(active_root, "assets", "textures")
+                if hasattr(mod, "SPEECH_DIR"):
+                    mod.SPEECH_DIR = os.path.join(active_root, "assets", "speech")
+                if hasattr(mod, "CLOCK_DIR"):
+                    mod.CLOCK_DIR = os.path.join(active_root, "assets", "clock")
+                if hasattr(mod, "PHONE_DIR"):
+                    mod.PHONE_DIR = os.path.join(active_root, "assets", "phone")
+                if hasattr(mod, "MESH_DIR"):
+                    mod.MESH_DIR = os.path.join(active_root, "assets", "meshes")
+            except Exception:
+                pass
+    return active_root
+
+ROOT = _init_ascii_runtime_root()                   # 纯英文安全运行根目录
 ASSETS = os.path.join(ROOT, "assets")               # 静态与生成资源总目录
 TEX_DIR = os.path.join(ASSETS, "textures")          # 材质贴图（木地板、墙面、床品、表情等）目录
 SPEECH_DIR = os.path.join(ASSETS, "speech")         # 机器人气泡字幕贴图目录
@@ -583,7 +678,10 @@ class Scene:
         # 连接 PyBullet 引擎（GUI 窗口模式或 DIRECT 后台无头渲染模式）
         opts = "--width=%d --height=%d" % (width, height)
         self.client = p.connect(p.GUI if gui else p.DIRECT, options=opts)
-        p.setAdditionalSearchPath(pybullet_data.getDataPath())
+        if pybullet_data is not None:
+            p.setAdditionalSearchPath(pybullet_data.getDataPath())
+        # 将纯英文资源根目录加入 PyBullet 内部搜索路径
+        p.setAdditionalSearchPath(ROOT.replace("\\", "/"))
         p.setGravity(0, 0, -9.81)                         # 设置标准重力加速度
         p.setTimeStep(1.0 / 60.0)                         # 设置物理仿真步长为 60 FPS
         p.setPhysicsEngineParameter(numSolverIterations=20,
@@ -609,6 +707,7 @@ class Scene:
         self.meshes = {}                  # 存放程序化生成的 OBJ 网格文件路径
         self.tex = self._load_textures()  # 加载所有 PNG 纹理贴图并返回贴图 ID 字典
         self.bodies = {}                  # 存放具名关键刚体 ID（如电子钟外壳与屏幕）
+        self.body_tex_map = {}            # 記錄每個剛體當前綁定的貼圖 ID，防止 changeVisualShape 調光時丟失貼圖
         self.unit_sphere = None           # 单位球体网格路径（用于缩放生成任意三轴椭球）
         self.unit_quad = None             # 单位平面网格路径（用于生成贴图卡片）
         self.scene_ambient_bodies = []    # 存放全屋参与睡眠调光的视觉刚体及初始材质颜色
@@ -685,12 +784,15 @@ class Scene:
             p._orig_createVisualShape = p.createVisualShape
             p._orig_createMultiBody = p.createMultiBody
             p._orig_resetBasePositionAndOrientation = p.resetBasePositionAndOrientation
+            p._orig_changeVisualShape = p.changeVisualShape
 
         scene_ref = self
         s = float(self.SUBJECT_SCALE)
 
         def hooked_createVisualShape(shapeType, *args, **kwargs):
-            """创建视觉几何体钩子：当处于主体构建阶段时，自动将网格、长方体、球体、圆柱、胶囊体尺寸放大 1.5 倍。"""
+            """创建视觉几何体钩子：当处于主体构建阶段时，自动将网格、长方体、球体、圆柱、胶囊体尺寸放大 1.5 倍，并将网格路径转为纯 ASCII 相对路径以兼容中文目录。"""
+            if shapeType == p.GEOM_MESH and "fileName" in kwargs and kwargs["fileName"]:
+                kwargs["fileName"] = os.path.abspath(kwargs["fileName"]).replace("\\", "/")
             if scene_ref._subject_scaling_active:
                 if shapeType == p.GEOM_MESH and "meshScale" in kwargs:
                     kwargs["meshScale"] = [float(v) * s for v in kwargs["meshScale"]]
@@ -723,14 +825,156 @@ class Scene:
                 posObj = list(scene_ref._scale_subject_pos(posObj))
             return p._orig_resetBasePositionAndOrientation(bodyUniqueId, posObj, ornObj, *args, **kwargs)
 
+        def hooked_changeVisualShape(objectUniqueId, linkIndex, *args, **kwargs):
+            """修改视觉属性钩子：PyBullet 底层 C++ 在调用 changeVisualShape 修改颜色时，若未显式传入 textureUniqueId，
+            会默认将 textureUniqueId 重置为 -1（导致闹钟、地板、床单等贴图瞬间丢失变灰白）！
+            此钩子自动记忆并补齐该刚体已绑定的 textureUniqueId。"""
+            key = (objectUniqueId, linkIndex)
+            if "textureUniqueId" in kwargs and kwargs["textureUniqueId"] is not None:
+                scene_ref.body_tex_map[key] = kwargs["textureUniqueId"]
+            elif key in scene_ref.body_tex_map and scene_ref.body_tex_map[key] is not None:
+                kwargs["textureUniqueId"] = scene_ref.body_tex_map[key]
+            return p._orig_changeVisualShape(objectUniqueId, linkIndex, *args, **kwargs)
+
         # 挂载钩子函数
         p.createVisualShape = hooked_createVisualShape
         p.createMultiBody = hooked_createMultiBody
         p.resetBasePositionAndOrientation = hooked_resetBasePositionAndOrientation
+        p.changeVisualShape = hooked_changeVisualShape
 
     # -----------------------------------------------------------------------
     # 贴图加载与基础网格生成
     # -----------------------------------------------------------------------
+    def _ensure_speech_and_clock_pngs(self):
+        """内置全量贴图兜底生成器：当 exe 环境中缺失字幕、闹钟、手机屏幕或基础贴图时，使用 PIL 实时绘制。"""
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+        except ImportError:
+            return
+
+        os.makedirs(TEX_DIR, exist_ok=True)
+        os.makedirs(SPEECH_DIR, exist_ok=True)
+        os.makedirs(CLOCK_DIR, exist_ok=True)
+        os.makedirs(PHONE_DIR, exist_ok=True)
+
+        # 尝试加载 Windows 中文字体（微软雅黑 / 黑体）与等宽数字字体
+        def _get_font(size, bold=False):
+            candidates = [
+                "C:/Windows/Fonts/msyhbd.ttc" if bold else "C:/Windows/Fonts/msyh.ttc",
+                "C:/Windows/Fonts/simhei.ttf",
+                "C:/Windows/Fonts/simsun.ttc",
+                "msyh.ttc",
+                "simhei.ttf",
+            ]
+            for fp in candidates:
+                if os.path.exists(fp):
+                    try:
+                        return ImageFont.truetype(fp, size)
+                    except Exception:
+                        pass
+            return ImageFont.load_default()
+
+        # 1. 检查并生成 4 张机器人气泡字幕贴图 (speech_plate_1.png ~ speech_plate_4.png)
+        for idx, text in SPEECH_LINES.items():
+            spath = os.path.join(SPEECH_DIR, f"speech_plate_{idx}.png")
+            if not os.path.exists(spath):
+                W, H = 1024, 256
+                img = Image.new("RGBA", (W, H), (252, 248, 240, 255))
+                draw = ImageDraw.Draw(img)
+                # 绘制温润圆角边框
+                draw.rounded_rectangle([10, 10, W - 11, H - 11], radius=36,
+                                       fill=(254, 250, 242, 255), outline=(210, 185, 150, 255), width=6)
+                font_sz = 64 if len(text) > 8 else 82
+                font = _get_font(font_sz, bold=True)
+                bbox = draw.textbbox((0, 0), text, font=font)
+                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                tx = (W - tw) // 2 - bbox[0]
+                ty = (H - th) // 2 - bbox[1]
+                draw.text((tx, ty), text, font=font, fill=(45, 38, 32, 255))
+                img.convert("RGB").save(spath)
+
+        # 2. 检查并生成 21 张电子闹钟数字贴图 (11:59:40 ~ 12:00:00)
+        clock_times = [(f"clock_11_59_{s:02d}.png", f"11:59:{s:02d}") for s in range(40, 60)]
+        clock_times.append(("clock_12_00_00.png", "12:00:00"))
+        font_clock = _get_font(128, bold=True)
+        for fname, t_str in clock_times:
+            cpath = os.path.join(CLOCK_DIR, fname)
+            if not os.path.exists(cpath):
+                W, H = 640, 320
+                img = Image.new("RGB", (W, H), (14, 16, 22))
+                draw = ImageDraw.Draw(img)
+                draw.rounded_rectangle([8, 8, W - 9, H - 9], radius=24,
+                                       fill=(18, 20, 28), outline=(45, 52, 68), width=4)
+                bbox = draw.textbbox((0, 0), t_str, font=font_clock)
+                tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                tx = (W - tw) // 2 - bbox[0]
+                ty = (H - th) // 2 - bbox[1]
+                # 12:00:00 零点时刻高亮为柔和暖橙色，其余时刻为护眼暖琥珀白
+                col = (255, 195, 110) if t_str == "12:00:00" else (245, 228, 190)
+                draw.text((tx, ty), t_str, font=font_clock, fill=col)
+                img.save(cpath)
+
+        # 3. 检查并生成手机屏幕贴图 (phone_screen.png)
+        ppath = os.path.join(PHONE_DIR, "phone_screen.png")
+        if not os.path.exists(ppath):
+            img = Image.new("RGB", (320, 640), (24, 30, 46))
+            draw = ImageDraw.Draw(img)
+            draw.rounded_rectangle([16, 28, 304, 210], radius=18, fill=(52, 78, 122))
+            draw.rounded_rectangle([16, 230, 304, 410], radius=18, fill=(68, 56, 98))
+            draw.rounded_rectangle([16, 430, 304, 600], radius=18, fill=(42, 88, 96))
+            img.save(ppath)
+
+        # 4. 检查并兜底生成 TEX_DIR 下的基础材质与人物表情贴图（防止 textures.py 未打包时缺失）
+        base_fallbacks = {
+            "floor_wood.png": (118, 78, 50),
+            "wall_plaster.png": (216, 198, 176),
+            "linen_cream.png": (244, 235, 218),
+            "linen_sheet.png": (248, 242, 230),
+            "duvet_oatmeal.png": (236, 224, 206),
+            "rug_weave.png": (212, 196, 174),
+            "lace_black.png": (28, 26, 30),
+            "hair_dark.png": (26, 22, 20),
+            "night_window.png": (18, 26, 48),
+            "art_warm_abstract.png": (198, 134, 88),
+            "skin_warm.png": (242, 206, 182),
+        }
+        for fname, rgb in base_fallbacks.items():
+            fpath = os.path.join(TEX_DIR, fname)
+            if not os.path.exists(fpath):
+                Image.new("RGB", (256, 256), rgb).save(fpath)
+
+        # 5. 检查并兜底生成 5 张女主角面部表情贴图
+        for face_name in ("face_indifferent.png", "face_indifferent_blink.png",
+                          "face_sad.png", "face_sad_blink.png", "face_sleep.png"):
+            fpath = os.path.join(TEX_DIR, face_name)
+            if not os.path.exists(fpath):
+                img = Image.new("RGB", (512, 512), (242, 206, 182))
+                d = ImageDraw.Draw(img)
+                is_closed = ("blink" in face_name) or ("sleep" in face_name)
+                is_sad = "sad" in face_name
+                # 眉毛
+                if is_sad:
+                    d.line([(155, 195), (215, 180)], fill=(55, 38, 30), width=6)
+                    d.line([(297, 180), (357, 195)], fill=(55, 38, 30), width=6)
+                else:
+                    d.line([(155, 185), (215, 182)], fill=(55, 38, 30), width=6)
+                    d.line([(297, 182), (357, 185)], fill=(55, 38, 30), width=6)
+                # 眼睛
+                if is_closed:
+                    d.arc([160, 215, 215, 242], start=10, end=170, fill=(45, 32, 26), width=5)
+                    d.arc([297, 215, 352, 242], start=10, end=170, fill=(45, 32, 26), width=5)
+                else:
+                    d.ellipse([172, 212, 204, 246], fill=(36, 26, 22))
+                    d.ellipse([308, 212, 340, 246], fill=(36, 26, 22))
+                    d.ellipse([178, 216, 188, 226], fill=(255, 255, 255))
+                    d.ellipse([314, 216, 324, 226], fill=(255, 255, 255))
+                # 嘴巴
+                if is_sad:
+                    d.arc([232, 330, 280, 356], start=195, end=345, fill=(175, 95, 88), width=5)
+                else:
+                    d.arc([234, 320, 278, 344], start=15, end=165, fill=(185, 98, 90), width=5)
+                img.save(fpath)
+
     def _load_textures(self):
         """检查并加载场景所需的全部 PNG 材质贴图（木纹、布艺、人物肤色、五种表情、电子钟与字幕）。"""
         need = [
@@ -741,55 +985,105 @@ class Scene:
             "face_indifferent.png", "face_indifferent_blink.png",
             "face_sad.png", "face_sad_blink.png", "face_sleep.png",
         ]
-        # 若贴图文件缺失，调用 textures.make_all() 程序化绘图的生成逻辑
-        missing = [n for n in need if not os.path.exists(os.path.join(TEX_DIR, n))]
-        if missing:
+        # 若基础贴图、气泡字幕贴图或电子钟贴图有任何一项缺失，均触发生成逻辑！
+        missing_tex = [n for n in need if not os.path.exists(os.path.join(TEX_DIR, n))]
+        missing_speech = [i for i in range(1, 5) if not os.path.exists(os.path.join(SPEECH_DIR, f"speech_plate_{i}.png"))]
+        missing_clock = [s for s in range(40, 60) if not os.path.exists(os.path.join(CLOCK_DIR, f"clock_11_59_{s:02d}.png"))]
+        if not os.path.exists(os.path.join(CLOCK_DIR, "clock_12_00_00.png")):
+            missing_clock.append(60)
+
+        if missing_tex or missing_speech or missing_clock:
             if not self.quiet:
-                print("生成程序化材质（首次运行稍慢）...")
+                print("检测到贴图/字幕/闹钟资源缺失，正在生成程序化材质...")
             if textures is not None and hasattr(textures, "make_all"):
-                textures.make_all()
+                try:
+                    textures.make_all()
+                except Exception as e:
+                    print("调用 textures.make_all() 异常:", e)
+            # 兜底保障：若气泡字幕或电子闹钟 PNG 仍不存在，使用内置 PIL 直接绘制生成！
+            self._ensure_speech_and_clock_pngs()
+        def _safe_load_tex(full_path):
+            """安全加载纹理：从纯英文缓存目录（ROOT）以正斜杠绝对路径加载，确保 PyBullet OpenGL 100% 识别。"""
+            if not full_path or not os.path.exists(full_path):
+                return None
+            norm_p = os.path.abspath(full_path).replace("\\", "/")
+            tex_id = p.loadTexture(norm_p)
+            if tex_id is not None and tex_id >= 0:
+                return tex_id
+            return None
+
         loaded = {}
         for n in need:
             path = os.path.join(TEX_DIR, n)
-            loaded[n] = p.loadTexture(path) if os.path.exists(path) else None
+            loaded[n] = _safe_load_tex(path)
 
         # 加载手机屏幕贴图与机器人 1~4 号气泡字幕贴图
         phone_path = os.path.join(PHONE_DIR, "phone_screen.png")
-        loaded["phone"] = p.loadTexture(phone_path) if os.path.exists(phone_path) else None
+        loaded["phone"] = _safe_load_tex(phone_path)
         for i in range(1, 5):
             spath = os.path.join(SPEECH_DIR, f"speech_plate_{i}.png")
-            loaded[f"speech{i}"] = p.loadTexture(spath) if os.path.exists(spath) else None
+            loaded[f"speech{i}"] = _safe_load_tex(spath)
 
         # 加载 11:59:40 至 12:00:00 的 21 张电子闹钟数字贴图
         for s in range(40, 60):
             key = "clock_11_59_%02d" % s
             path = os.path.join(CLOCK_DIR, "clock_11_59_%02d.png" % s)
-            if os.path.exists(path):
-                loaded[key] = p.loadTexture(path)
+            loaded[key] = _safe_load_tex(path)
         c12 = os.path.join(CLOCK_DIR, "clock_12_00_00.png")
-        if os.path.exists(c12):
-            loaded["clock_12_00_00"] = p.loadTexture(c12)
+        loaded["clock_12_00_00"] = _safe_load_tex(c12)
         return loaded
 
     def _ensure_meshes(self):
-        """生成通用单位球、单位平面、圆角字幕板、圆角时钟外壳与女主角面部曲面贴片 OBJ 网格。"""
+        """生成通用单位球、单位平面、圆角字幕板、圆角时钟外壳与女主角面部曲面贴片 OBJ 网格（带内置 UV 平面与面板兜底生成，确保 EXE 中闹钟和字幕 100% 正常显示贴图）。"""
+        mesh_dir = os.path.join(ASSETS, "meshes")
+        os.makedirs(mesh_dir, exist_ok=True)
         if meshgen is not None:
-            self.unit_sphere = meshgen.uv_sphere_mesh("unit_sphere", rings=28, segments=40)
-            self.unit_quad = meshgen.quad_mesh("unit_quad", 1.0, 1.0)
-            self.meshes["speech_panel"] = meshgen.rounded_rect_panel(
-                "speech_panel", 1.0, 0.25, 0.039, thickness=0.006, segments=14)
-            self.meshes["clock_panel"] = meshgen.rounded_rect_panel(
-                "clock_panel", 1.0, 0.50, 0.08, thickness=0.06, segments=10)
-            self.meshes["head_face"] = meshgen.ellipsoid_patch_mesh(
-                "head_face", 0.080, 0.094, 0.089,
-                az_half=math.radians(64), el_half=math.radians(54),
-                nu=30, nv=30)
+            try:
+                self.unit_sphere = meshgen.uv_sphere_mesh("unit_sphere", rings=28, segments=40)
+                self.unit_quad = meshgen.quad_mesh("unit_quad", 1.0, 1.0)
+                self.meshes["speech_panel"] = meshgen.rounded_rect_panel(
+                    "speech_panel", 1.0, 0.25, 0.039, thickness=0.006, segments=14)
+                self.meshes["clock_panel"] = meshgen.rounded_rect_panel(
+                    "clock_panel", 1.0, 0.50, 0.08, thickness=0.06, segments=10)
+                self.meshes["head_face"] = meshgen.ellipsoid_patch_mesh(
+                    "head_face", 0.080, 0.094, 0.089,
+                    az_half=math.radians(64), el_half=math.radians(54),
+                    nu=30, nv=30)
+            except Exception as e:
+                print("调用 meshgen 生成网格异常，启用内置网格兜底:", e)
+                self.unit_sphere = ""
+                self.unit_quad = ""
+                self.meshes["speech_panel"] = ""
+                self.meshes["clock_panel"] = ""
+                self.meshes["head_face"] = ""
         else:
             self.unit_sphere = ""
             self.unit_quad = ""
             self.meshes["speech_panel"] = ""
             self.meshes["clock_panel"] = ""
             self.meshes["head_face"] = ""
+
+        # 关键兜底：PyBullet 的 GEOM_BOX 不包含标准正面 0~1 UV 映射，会导致闹钟和字幕贴图无法显示！
+        # 若 unit_quad 或 speech_panel 缺失，直接生成带标准 UV 坐标的 OBJ 网格文件。
+        if not self.unit_quad or not os.path.exists(self.unit_quad):
+            quad_obj = os.path.join(mesh_dir, "unit_quad.obj")
+            with open(quad_obj, "w", encoding="utf-8") as f:
+                f.write("# unit_quad with standard UV\n"
+                        "v -0.5 -0.5 0.0\nv 0.5 -0.5 0.0\nv 0.5 0.5 0.0\nv -0.5 0.5 0.0\n"
+                        "vt 0.0 0.0\nvt 1.0 0.0\nvt 1.0 1.0\nvt 0.0 1.0\n"
+                        "vn 0.0 0.0 1.0\n"
+                        "f 1/1/1 2/2/1 3/3/1\nf 1/1/1 3/3/1 4/4/1\n")
+            self.unit_quad = quad_obj
+
+        if not self.meshes.get("speech_panel") or not os.path.exists(self.meshes.get("speech_panel", "")):
+            sp_obj = os.path.join(mesh_dir, "speech_panel.obj")
+            with open(sp_obj, "w", encoding="utf-8") as f:
+                f.write("# speech_panel quad (1.0 x 0.25) with standard UV\n"
+                        "v -0.5 -0.125 0.0\nv 0.5 -0.125 0.0\nv 0.5 0.125 0.0\nv -0.5 0.125 0.0\n"
+                        "vt 0.0 0.0\nvt 1.0 0.0\nvt 1.0 1.0\nvt 0.0 1.0\n"
+                        "vn 0.0 0.0 1.0\n"
+                        "f 1/1/1 2/2/1 3/3/1\nf 1/1/1 3/3/1 4/4/1\n")
+            self.meshes["speech_panel"] = sp_obj
 
     def load_tex(self, key):
         """根据贴图键名获取已加载的 PyBullet 纹理 ID。"""
@@ -1540,13 +1834,13 @@ class Scene:
                     rgba=(0.18, 0.17, 0.16, 1.0))
         self.clock_time = "11:59:40"
 
-    def set_clock(self, time_str):
-        """若电子钟时间字符串发生变化，则切换对应的数字纹理贴图。"""
-        if time_str == self.clock_time:
+    def set_clock(self, time_str, force=False):
+        """切换电子钟数字纹理贴图（支持 force 强制刷新纹理）。"""
+        if not force and time_str == self.clock_time:
             return
         self.clock_time = time_str
         key = "clock_" + time_str.replace(":", "_")
-        if key in self.tex:
+        if key in self.tex and self.tex[key] is not None and "clock_screen" in self.bodies:
             self.change_tex(self.bodies["clock_screen"], self.tex[key])
 
     def _build_robot(self):
@@ -1662,16 +1956,16 @@ class Scene:
         self.speech_q = (0, 0, 0, 1)
         self.update_camera_billboards()
 
-    def set_speech(self, index):
+    def set_speech(self, index, force=False):
         """显示指定编号（1~4）的气泡字幕并切换对应文字贴图；若传入无效编号则隐藏字幕。"""
         if index not in self.speech_tex_keys:
             self.speech_visible = False
             return
         self.speech_visible = True
-        if index != self.speech_current:
+        if force or index != self.speech_current:
             self.speech_current = index
             tex_val = self.tex.get(self.speech_tex_keys[index], None)
-            if tex_val:
+            if tex_val is not None and hasattr(self, "speech_body"):
                 self.change_tex(self.speech_body, tex_val)
 
     def hide_speech(self):
@@ -1757,8 +2051,8 @@ class Scene:
         self._logged = set()
         self._speech_idx = None
         self.phone_inserted = False
-        self.set_clock("11:59:40")    # 重置闹钟为 11:59:40
-        self.set_speech(1)            # 重置字幕为第 1 句“不早了”
+        self.set_clock("11:59:40", force=True)    # 强制刷新闹钟贴图为 11:59:40
+        self.set_speech(1, force=True)            # 强制刷新字幕贴图为第 1 句“不早了”
         self.current_dim_factor = 0.0
         self.current_curtain_close = 0.0
         self.current_duvet_cover = 0.0
